@@ -4,7 +4,6 @@ import android.Manifest
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -20,9 +19,6 @@ import android.media.ToneGenerator
 import android.net.Uri
 import android.nfc.NfcAdapter
 import android.nfc.Tag
-import android.nfc.tech.IsoDep
-import android.nfc.tech.NfcA
-import android.nfc.tech.NfcB
 import android.os.Build
 import android.os.Bundle
 import android.util.Base64
@@ -299,19 +295,16 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)?.let {
             sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_UI)
         }
-        val intent = Intent(this, javaClass).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
-        val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) PendingIntent.FLAG_MUTABLE else 0
-        val pendingIntent = PendingIntent.getActivity(this, 0, intent, flags)
-        val filters = arrayOf(
-            IntentFilter(NfcAdapter.ACTION_TECH_DISCOVERED),
-            IntentFilter(NfcAdapter.ACTION_TAG_DISCOVERED)
-        )
-        val techLists = arrayOf(
-            arrayOf(IsoDep::class.java.name),
-            arrayOf(NfcA::class.java.name),
-            arrayOf(NfcB::class.java.name)
-        )
-        nfcAdapter?.enableForegroundDispatch(this, pendingIntent, filters, techLists)
+        if (nfcAdapter == null) {
+            statusText.text = "خطأ: الهاتف لا يدعم NFC"
+        } else if (!nfcAdapter!!.isEnabled) {
+            statusText.text = "تنبيه: فعّل NFC من إعدادات الهاتف أولاً"
+        } else {
+            val intent = Intent(this, javaClass).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) PendingIntent.FLAG_MUTABLE else 0
+            val pendingIntent = PendingIntent.getActivity(this, 0, intent, flags)
+            nfcAdapter?.enableForegroundDispatch(this, pendingIntent, null, null)
+        }
     }
 
     override fun onPause() {
