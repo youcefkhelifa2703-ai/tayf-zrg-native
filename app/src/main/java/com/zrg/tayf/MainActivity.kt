@@ -1,7 +1,9 @@
 package com.zrg.tayf
 
 import android.Manifest
+import android.app.PendingIntent
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -15,6 +17,7 @@ import android.hardware.SensorManager
 import android.net.Uri
 import android.nfc.NfcAdapter
 import android.nfc.Tag
+import android.os.Build
 import android.os.Bundle
 import android.util.Base64
 import android.view.Gravity
@@ -38,7 +41,7 @@ import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 import kotlin.math.abs
 
-class MainActivity : AppCompatActivity(), SensorEventListener, NfcAdapter.ReaderCallback {
+class MainActivity : AppCompatActivity(), SensorEventListener {
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
 
@@ -289,18 +292,26 @@ class MainActivity : AppCompatActivity(), SensorEventListener, NfcAdapter.Reader
         sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)?.let {
             sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_UI)
         }
-        nfcAdapter?.enableReaderMode(this, this, NfcAdapter.FLAG_READER_NFC_A or NfcAdapter.FLAG_READER_NFC_B or NfcAdapter.FLAG_READER_SKIP_NDEF_CHECK, null)
+        val intent = Intent(this, javaClass).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) PendingIntent.FLAG_MUTABLE else 0
+        val pendingIntent = PendingIntent.getActivity(this, 0, intent, flags)
+        nfcAdapter?.enableForegroundDispatch(this, pendingIntent, null, null)
     }
 
     override fun onPause() {
         super.onPause()
         sensorManager.unregisterListener(this)
-        nfcAdapter?.disableReaderMode(this)
+        nfcAdapter?.disableForegroundDispatch(this)
     }
 
-    override fun onTagDiscovered(tag: Tag) {
-        val uidHex = tag.id.joinToString("") { "%02X".format(it) }
-        runOnUiThread { handleNfcCard(uidHex) }
+    @Suppress("DEPRECATION")
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        val tag: Tag? = intent.getParcelableExtra(NfcAdapter.EXTRA_TAG)
+        if (tag != null) {
+            val uidHex = tag.id.joinToString("") { "%02X".format(it) }
+            handleNfcCard(uidHex)
+        }
     }
 
     private fun handleNfcCard(uid: String) {
@@ -431,4 +442,3 @@ class MainActivity : AppCompatActivity(), SensorEventListener, NfcAdapter.Reader
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) startHighResCamera()
     }
 }
-
