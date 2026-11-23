@@ -4,6 +4,7 @@ import android.Manifest
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -14,9 +15,14 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.media.AudioManager
+import android.media.ToneGenerator
 import android.net.Uri
 import android.nfc.NfcAdapter
 import android.nfc.Tag
+import android.nfc.tech.IsoDep
+import android.nfc.tech.NfcA
+import android.nfc.tech.NfcB
 import android.os.Build
 import android.os.Bundle
 import android.util.Base64
@@ -97,6 +103,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         } else {
             ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.CAMERA), 100)
         }
+        handleIncomingIntent(intent)
     }
 
     private fun buildOfficialUI() {
@@ -295,7 +302,16 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         val intent = Intent(this, javaClass).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
         val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) PendingIntent.FLAG_MUTABLE else 0
         val pendingIntent = PendingIntent.getActivity(this, 0, intent, flags)
-        nfcAdapter?.enableForegroundDispatch(this, pendingIntent, null, null)
+        val filters = arrayOf(
+            IntentFilter(NfcAdapter.ACTION_TECH_DISCOVERED),
+            IntentFilter(NfcAdapter.ACTION_TAG_DISCOVERED)
+        )
+        val techLists = arrayOf(
+            arrayOf(IsoDep::class.java.name),
+            arrayOf(NfcA::class.java.name),
+            arrayOf(NfcB::class.java.name)
+        )
+        nfcAdapter?.enableForegroundDispatch(this, pendingIntent, filters, techLists)
     }
 
     override fun onPause() {
@@ -304,11 +320,18 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         nfcAdapter?.disableForegroundDispatch(this)
     }
 
-    @Suppress("DEPRECATION")
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        setIntent(intent)
+        handleIncomingIntent(intent)
+    }
+
+    @Suppress("DEPRECATION")
+    private fun handleIncomingIntent(intent: Intent?) {
+        if (intent == null) return
         val tag: Tag? = intent.getParcelableExtra(NfcAdapter.EXTRA_TAG)
         if (tag != null) {
+            try { ToneGenerator(AudioManager.STREAM_NOTIFICATION, 100).startTone(ToneGenerator.TONE_PROP_BEEP, 150) } catch (_: Exception) {}
             val uidHex = tag.id.joinToString("") { "%02X".format(it) }
             handleNfcCard(uidHex)
         }
