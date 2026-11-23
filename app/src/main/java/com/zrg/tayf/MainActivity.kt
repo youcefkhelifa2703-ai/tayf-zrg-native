@@ -21,6 +21,8 @@ import android.nfc.NfcAdapter
 import android.nfc.Tag
 import android.os.Build
 import android.os.Bundle
+import android.provider.OpenableColumns
+import android.text.InputType
 import android.util.Base64
 import android.view.Gravity
 import android.view.View
@@ -33,6 +35,7 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
@@ -70,22 +73,33 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     private lateinit var arTitle: TextView
     private lateinit var arImage: ImageView
     private lateinit var arNote: TextView
+    private lateinit var unlockPinBtn: Button
+    private lateinit var openFileBtn: Button
+
     private lateinit var createDialog: LinearLayout
     private lateinit var noteInput: EditText
     private lateinit var pickedStatus: TextView
+    private lateinit var nfcWaitBox: LinearLayout
+    private lateinit var nfcWaitText: TextView
 
-    private var isCreatingMode = false
-    private var selectedImageBase64: String? = null
+    private lateinit var pinDialog: LinearLayout
+    private lateinit var pinDialogTitle: TextView
+    private lateinit var pinInput: EditText
+    private lateinit var pinConfirmBtn: Button
+
+    private var appState = "SCANNING" // SCANNING | PICKING | WAITING_LOCK_NFC | PIN_LOCK | PIN_UNLOCK
+    private var selectedFileBytes: ByteArray? = null
+    private var selectedFileName: String = ""
+    private var selectedMimeType: String = ""
     private var activeCapsuleIndex = -1
+    private var unlockedItemId: String? = null
+    private var lastUnlockedFile: File? = null
+    private var lastUnlockedMime: String = ""
 
-    private val pickImageLauncher = registerForActivityResult(
+    private val pickAnyFileLauncher = registerForActivityResult(
         ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
-        if (uri != null) {
-            selectedImageBase64 = compressUriToBase64(uri)
-            pickedStatus.text = "✓ تم إرفاق الصورة بنجاح"
-            pickedStatus.setTextColor(Color.parseColor("#38BDF8"))
-        }
+        if (uri != null) processSelectedUri(uri)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -112,19 +126,20 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         root.addView(previewView)
 
         val reticle = View(this).apply {
-            layoutParams = FrameLayout.LayoutParams(dp(36), dp(36), Gravity.CENTER)
+            layoutParams = FrameLayout.LayoutParams(dp(38), dp(38), Gravity.CENTER)
             background = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
-                setStroke(dp(2), Color.parseColor("#8038BDF8"))
+                setStroke(dp(2), Color.parseColor("#9938BDF8"))
             }
         }
         root.addView(reticle)
 
+        // الشريط العلوي
         val topBar = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(18), dp(14), dp(18), dp(14))
             layoutParams = FrameLayout.LayoutParams(-1, -2, Gravity.TOP).apply { setMargins(dp(16), dp(36), dp(16), 0) }
-            background = roundBg("#CC0F172A", "#334155", 16)
+            background = roundBg("#D90F172A", "#334155", 16)
         }
 
         val headerRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
@@ -144,7 +159,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         headerRow.addView(coordsText)
 
         statusText = TextView(this).apply {
-            text = "وجّه الكاميرا نحو الزاوية المطلوبة"
+            text = "وجّه الكاميرا نحو أي زاوية لتثبيت أو كشف طَيْف"
             textSize = 13f
             setTextColor(Color.WHITE)
             setPadding(0, dp(4), 0, 0)
@@ -153,45 +168,67 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         topBar.addView(statusText)
         root.addView(topBar)
 
+        // بطاقة الطَيْف العائمة في المكان (AR Card)
         arCard = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
             visibility = View.GONE
-            setPadding(dp(16), dp(16), dp(16), dp(16))
-            layoutParams = FrameLayout.LayoutParams(dp(290), -2, Gravity.CENTER)
-            background = roundBg("#E60F172A", "#38BDF8", 20)
-            elevation = dp(12).toFloat()
+            setPadding(dp(18), dp(18), dp(18), dp(18))
+            layoutParams = FrameLayout.LayoutParams(dp(300), -2, Gravity.CENTER)
+            background = roundBg("#EE0F172A", "#38BDF8", 20)
+            elevation = dp(14).toFloat()
         }
         arTitle = TextView(this).apply {
-            text = "محتوى مشفر مثبت في هذه الزاوية"
-            textSize = 14f
+            text = "🔒 طَيْف مشفر مثبت في هذا المكان"
+            textSize = 15f
             setTypeface(null, Typeface.BOLD)
             setTextColor(Color.parseColor("#38BDF8"))
             gravity = Gravity.CENTER
         }
         arImage = ImageView(this).apply {
             visibility = View.GONE
-            layoutParams = LinearLayout.LayoutParams(dp(250), dp(220)).apply { topMargin = dp(10) }
+            layoutParams = LinearLayout.LayoutParams(dp(260), dp(230)).apply { topMargin = dp(12) }
             scaleType = ImageView.ScaleType.FIT_CENTER
         }
         arNote = TextView(this).apply {
-            text = "قرّب بطاقة التعريف الوطنية من ظهر الهاتف لفتحه"
+            text = "قرّب بطاقة التعريف الوطنية لفتحه"
             textSize = 13f
-            setTextColor(Color.parseColor("#CBD5E1"))
+            setTextColor(Color.parseColor("#E2E8F0"))
             gravity = Gravity.CENTER
-            setPadding(0, dp(8), 0, 0)
+            setPadding(0, dp(10), 0, 0)
+        }
+        unlockPinBtn = Button(this).apply {
+            text = "🔢 إدخال الكود السري لفتح المحتوى"
+            visibility = View.GONE
+            setTextColor(Color.parseColor("#0F172A"))
+            setTypeface(null, Typeface.BOLD)
+            background = roundBg("#38BDF8", "#38BDF8", 12)
+            layoutParams = LinearLayout.LayoutParams(-1, dp(46)).apply { topMargin = dp(12) }
+            setOnClickListener { openPinDialog(isLocking = false) }
+        }
+        openFileBtn = Button(this).apply {
+            text = "فتح الملف المحفوظ"
+            visibility = View.GONE
+            setTextColor(Color.parseColor("#0F172A"))
+            setTypeface(null, Typeface.BOLD)
+            background = roundBg("#4ADE80", "#4ADE80", 12)
+            layoutParams = LinearLayout.LayoutParams(-1, dp(46)).apply { topMargin = dp(12) }
+            setOnClickListener { openDecryptedExternalFile() }
         }
         arCard.addView(arTitle)
         arCard.addView(arImage)
         arCard.addView(arNote)
+        arCard.addView(unlockPinBtn)
+        arCard.addView(openFileBtn)
         root.addView(arCard)
 
+        // شريط التحكم السفلي
         val bottomBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             layoutParams = FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM).apply { setMargins(dp(16), 0, dp(16), dp(28)) }
         }
         val hideBtn = Button(this).apply {
-            text = "تثبيت طَيْف في هذه الزاوية"
+            text = "تثبيت صورة أو ملف في هذا المكان"
             textSize = 14f
             setTypeface(null, Typeface.BOLD)
             setTextColor(Color.parseColor("#0F172A"))
@@ -200,94 +237,215 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
             setOnClickListener { openCreatePanel() }
         }
         val clearBtn = Button(this).apply {
-            text = "مسح"
+            text = "حذف"
             textSize = 13f
             setTextColor(Color.WHITE)
             background = roundBg("#991B1B", "#7F1D1D", 14)
             layoutParams = LinearLayout.LayoutParams(dp(74), dp(52)).apply { marginStart = dp(10) }
             setOnClickListener {
                 getCapsFile().delete()
+                getVaultDir().deleteRecursively()
                 activeCapsuleIndex = -1
+                unlockedItemId = null
                 arCard.visibility = View.GONE
-                statusText.text = "تم مسح جميع نقاط الطَيْف"
+                statusText.text = "تم حذف جميع العناصر المثبتة"
             }
         }
         bottomBar.addView(hideBtn)
         bottomBar.addView(clearBtn)
         root.addView(bottomBar)
 
+        // نافذة اختيار الصورة أو الملف + اختيار طريقة القفل
         createDialog = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             visibility = View.GONE
             setPadding(dp(20), dp(20), dp(20), dp(20))
-            layoutParams = FrameLayout.LayoutParams(-1, -2, Gravity.CENTER).apply { setMargins(dp(20), 0, dp(20), 0) }
-            background = roundBg("#F20F172A", "#38BDF8", 20)
+            layoutParams = FrameLayout.LayoutParams(-1, -2, Gravity.CENTER).apply { setMargins(dp(18), 0, dp(18), 0) }
+            background = roundBg("#F50F172A", "#38BDF8", 20)
             elevation = dp(20).toFloat()
         }
         val dlgTitle = TextView(this).apply {
-            text = "إخفاء محتوى في هذه الزاوية"
+            text = "إخفاء صورة أو ملف في هذه الزاوية"
             textSize = 16f
             setTypeface(null, Typeface.BOLD)
             setTextColor(Color.WHITE)
         }
         val pickImgBtn = Button(this).apply {
-            text = "اختيار صورة من المعرض"
+            text = "1. اختيار صورة من المعرض"
             setTextColor(Color.WHITE)
             background = roundBg("#1E293B", "#475569", 12)
-            layoutParams = LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(14) }
-            setOnClickListener { pickImageLauncher.launch("image/*") }
+            layoutParams = LinearLayout.LayoutParams(-1, dp(46)).apply { topMargin = dp(12) }
+            setOnClickListener { pickAnyFileLauncher.launch("image/*") }
+        }
+        val pickFileBtn = Button(this).apply {
+            text = "أو اختيار أي ملف (PDF / وثيقة / صوت)"
+            setTextColor(Color.WHITE)
+            background = roundBg("#1E293B", "#475569", 12)
+            layoutParams = LinearLayout.LayoutParams(-1, dp(46)).apply { topMargin = dp(8) }
+            setOnClickListener { pickAnyFileLauncher.launch("*/*") }
         }
         pickedStatus = TextView(this).apply {
-            text = "لم يتم اختيار صورة بعد (اختياري)"
+            text = "لم يتم اختيار ملف بعد"
             textSize = 12f
             setTextColor(Color.parseColor("#94A3B8"))
-            setPadding(0, dp(6), 0, dp(10))
+            setPadding(0, dp(8), 0, dp(8))
         }
         noteInput = EditText(this).apply {
-            hint = "اكتب ملاحظة أو وصفاً سرياً..."
+            hint = "اكتب ملاحظة سرية (اختياري)..."
             setHintTextColor(Color.parseColor("#64748B"))
             setTextColor(Color.WHITE)
             setPadding(dp(12), dp(12), dp(12), dp(12))
             background = roundBg("#1E293B", "#334155", 12)
         }
-        val nfcHint = TextView(this).apply {
-            text = "قرّب بطاقة التعريف الوطنية من ظهر الهاتف الآن للقفل والحفظ"
+
+        val lockChoiceLabel = TextView(this).apply {
+            text = "2. اختر طريقة القفل والحفظ الدائم:"
             textSize = 13f
             setTypeface(null, Typeface.BOLD)
             setTextColor(Color.parseColor("#38BDF8"))
-            gravity = Gravity.CENTER
-            setPadding(dp(10), dp(14), dp(10), dp(14))
-            layoutParams = LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) }
-            background = roundBg("#172554", "#38BDF8", 12)
+            setPadding(0, dp(14), 0, dp(8))
         }
+
+        val lockButtonsRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+        val lockNfcBtn = Button(this).apply {
+            text = "🪪 قفل بالبطاقة"
+            textSize = 13f
+            setTextColor(Color.parseColor("#0F172A"))
+            setTypeface(null, Typeface.BOLD)
+            background = roundBg("#38BDF8", "#38BDF8", 12)
+            layoutParams = LinearLayout.LayoutParams(0, dp(48), 1f).apply { marginEnd = dp(6) }
+            setOnClickListener { requestCardToLock() }
+        }
+        val lockPinBtn = Button(this).apply {
+            text = "🔢 قفل بكود"
+            textSize = 13f
+            setTextColor(Color.WHITE)
+            setTypeface(null, Typeface.BOLD)
+            background = roundBg("#2563EB", "#60A5FA", 12)
+            layoutParams = LinearLayout.LayoutParams(0, dp(48), 1f).apply { marginStart = dp(6) }
+            setOnClickListener { requestPinToLock() }
+        }
+        lockButtonsRow.addView(lockNfcBtn)
+        lockButtonsRow.addView(lockPinBtn)
+
         val cancelBtn = Button(this).apply {
             text = "إلغاء"
             setTextColor(Color.parseColor("#CBD5E1"))
             background = roundBg("#1E293B", "#334155", 12)
-            layoutParams = LinearLayout.LayoutParams(-1, dp(46)).apply { topMargin = dp(10) }
-            setOnClickListener { closeCreatePanel() }
+            layoutParams = LinearLayout.LayoutParams(-1, dp(44)).apply { topMargin = dp(10) }
+            setOnClickListener { closeAllDialogs() }
         }
         createDialog.addView(dlgTitle)
         createDialog.addView(pickImgBtn)
+        createDialog.addView(pickFileBtn)
         createDialog.addView(pickedStatus)
         createDialog.addView(noteInput)
-        createDialog.addView(nfcHint)
+        createDialog.addView(lockChoiceLabel)
+        createDialog.addView(lockButtonsRow)
         createDialog.addView(cancelBtn)
         root.addView(createDialog)
+
+        // نافذة انتظار البطاقة (NFC)
+        nfcWaitBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            visibility = View.GONE
+            setPadding(dp(24), dp(28), dp(24), dp(24))
+            layoutParams = FrameLayout.LayoutParams(-1, -2, Gravity.CENTER).apply { setMargins(dp(22), 0, dp(22), 0) }
+            background = roundBg("#FA090D16", "#38BDF8", 22)
+            elevation = dp(24).toFloat()
+        }
+        val nfcIcon = TextView(this).apply {
+            text = "📡"
+            textSize = 42f
+            gravity = Gravity.CENTER
+        }
+        nfcWaitText = TextView(this).apply {
+            text = "يرجى تقريب بطاقة التعريف الوطنية من ظهر الهاتف الآن..."
+            textSize = 16f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+            setPadding(0, dp(14), 0, dp(18))
+        }
+        val cancelNfcBtn = Button(this).apply {
+            text = "إلغاء العملية"
+            setTextColor(Color.WHITE)
+            background = roundBg("#1E293B", "#475569", 12)
+            layoutParams = LinearLayout.LayoutParams(-1, dp(46))
+            setOnClickListener { closeAllDialogs() }
+        }
+        nfcWaitBox.addView(nfcIcon)
+        nfcWaitBox.addView(nfcWaitText)
+        nfcWaitBox.addView(cancelNfcBtn)
+        root.addView(nfcWaitBox)
+
+        // نافذة إدخال الكود السري (PIN)
+        pinDialog = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            visibility = View.GONE
+            setPadding(dp(24), dp(24), dp(24), dp(24))
+            layoutParams = FrameLayout.LayoutParams(-1, -2, Gravity.CENTER).apply { setMargins(dp(24), 0, dp(24), 0) }
+            background = roundBg("#FA090D16", "#60A5FA", 22)
+            elevation = dp(24).toFloat()
+        }
+        pinDialogTitle = TextView(this).apply {
+            text = "أدخل الرمز السري (الكود)"
+            textSize = 16f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+        }
+        pinInput = EditText(this).apply {
+            hint = "••••"
+            setHintTextColor(Color.parseColor("#64748B"))
+            setTextColor(Color.WHITE)
+            textSize = 20f
+            gravity = Gravity.CENTER
+            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_VARIATION_PASSWORD
+            setPadding(dp(14), dp(14), dp(14), dp(14))
+            background = roundBg("#1E293B", "#3B82F6", 12)
+            layoutParams = LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(14) }
+        }
+        pinConfirmBtn = Button(this).apply {
+            text = "تأكيد"
+            setTextColor(Color.WHITE)
+            setTypeface(null, Typeface.BOLD)
+            background = roundBg("#2563EB", "#60A5FA", 12)
+            layoutParams = LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(14) }
+            setOnClickListener { handlePinSubmit() }
+        }
+        val cancelPinBtn = Button(this).apply {
+            text = "إلغاء"
+            setTextColor(Color.parseColor("#CBD5E1"))
+            background = roundBg("#1E293B", "#334155", 12)
+            layoutParams = LinearLayout.LayoutParams(-1, dp(44)).apply { topMargin = dp(8) }
+            setOnClickListener { closeAllDialogs() }
+        }
+        pinDialog.addView(pinDialogTitle)
+        pinDialog.addView(pinInput)
+        pinDialog.addView(pinConfirmBtn)
+        pinDialog.addView(cancelPinBtn)
+        root.addView(pinDialog)
 
         setContentView(root)
     }
 
     private fun startHighResCamera() {
-        val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
-        cameraProviderFuture.addListener({
-            val cameraProvider = cameraProviderFuture.get()
-            val preview = Preview.Builder().build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
-            try {
-                cameraProvider.unbindAll()
-                cameraProvider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview)
-            } catch (_: Exception) {}
-        }, ContextCompat.getMainExecutor(this))
+        previewView.post {
+            val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
+            cameraProviderFuture.addListener({
+                val cameraProvider = cameraProviderFuture.get()
+                val preview = Preview.Builder().build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
+                try {
+                    cameraProvider.unbindAll()
+                    cameraProvider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview)
+                } catch (_: Exception) {}
+            }, ContextCompat.getMainExecutor(this))
+        }
     }
 
     override fun onResume() {
@@ -295,11 +453,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)?.let {
             sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_UI)
         }
-        if (nfcAdapter == null) {
-            statusText.text = "خطأ: الهاتف لا يدعم NFC"
-        } else if (!nfcAdapter!!.isEnabled) {
-            statusText.text = "تنبيه: فعّل NFC من إعدادات الهاتف أولاً"
-        } else {
+        if (nfcAdapter != null && nfcAdapter!!.isEnabled) {
             val intent = Intent(this, javaClass).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
             val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) PendingIntent.FLAG_MUTABLE else 0
             val pendingIntent = PendingIntent.getActivity(this, 0, intent, flags)
@@ -324,137 +478,13 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         if (intent == null) return
         val tag: Tag? = intent.getParcelableExtra(NfcAdapter.EXTRA_TAG)
         if (tag != null) {
-            try { ToneGenerator(AudioManager.STREAM_NOTIFICATION, 100).startTone(ToneGenerator.TONE_PROP_BEEP, 150) } catch (_: Exception) {}
+            try { ToneGenerator(AudioManager.STREAM_NOTIFICATION, 100).startTone(ToneGenerator.TONE_PROP_BEEP, 180) } catch (_: Exception) {}
             val uidHex = tag.id.joinToString("") { "%02X".format(it) }
             handleNfcCard(uidHex)
         }
     }
 
-    private fun handleNfcCard(uid: String) {
-        if (isCreatingMode) {
-            val textVal = noteInput.text.toString().trim()
-            if (selectedImageBase64 == null && textVal.isEmpty()) {
-                Toast.makeText(this, "اختر صورة أو اكتب نصاً أولاً", Toast.LENGTH_SHORT).show()
-                return
-            }
-            val payload = JSONObject().apply {
-                put("img", selectedImageBase64 ?: "")
-                put("txt", textVal)
-            }.toString()
-            val arr = loadCapsArray()
-            arr.put(JSONObject().apply {
-                put("az", currentAzimuth.toDouble())
-                put("pt", currentPitch.toDouble())
-                put("enc", encryptAes(payload, uid))
-            })
-            getCapsFile().writeText(arr.toString())
-            closeCreatePanel()
-            statusText.text = "تم إخفاء الطَيْف وقفله بالبطاقة ($uid)"
-            evaluateAngle()
-        } else {
-            val arr = loadCapsArray()
-            if (arr.length() == 0) {
-                statusText.text = "تم رصد البطاقة ($uid) — لا يوجد محتوى مخفي"
-                return
-            }
-            val idx = if (activeCapsuleIndex in 0 until arr.length()) activeCapsuleIndex else arr.length() - 1
-            val decrypted = decryptAes(arr.getJSONObject(idx).getString("enc"), uid)
-            if (decrypted != null) {
-                val obj = JSONObject(decrypted)
-                val imgB64 = obj.optString("img", "")
-                val txt = obj.optString("txt", "")
-                arCard.visibility = View.VISIBLE
-                arTitle.text = "تم التحقق من الهوية ($uid)"
-                if (imgB64.isNotEmpty()) {
-                    val bytes = Base64.decode(imgB64, Base64.DEFAULT)
-                    arImage.setImageBitmap(BitmapFactory.decodeByteArray(bytes, 0, bytes.size))
-                    arImage.visibility = View.VISIBLE
-                } else arImage.visibility = View.GONE
-                arNote.text = if (txt.isNotEmpty()) txt else "صورة مشفرة مخفية في هذه الزاوية"
-                statusText.text = "تم فتح المحتوى بنجاح"
-            } else {
-                statusText.text = "البطاقة غير مطابقة لهذا القفل"
-            }
-        }
-    }
-
-    override fun onSensorChanged(event: SensorEvent) {
-        if (event.sensor.type == Sensor.TYPE_ROTATION_VECTOR) {
-            SensorManager.getRotationMatrixFromVector(rotMatrix, event.values)
-            SensorManager.getOrientation(rotMatrix, orientationAngles)
-            currentAzimuth = ((Math.toDegrees(orientationAngles[0].toDouble()) + 360) % 360).toFloat()
-            currentPitch = Math.toDegrees(orientationAngles[1].toDouble()).toFloat()
-            coordsText.text = "${currentAzimuth.toInt()}° | ${currentPitch.toInt()}°"
-            if (!isCreatingMode) evaluateAngle()
-        }
-    }
-
-    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
-
-    private fun evaluateAngle() {
-        val arr = loadCapsArray()
-        if (arr.length() == 0) { arCard.visibility = View.GONE; activeCapsuleIndex = -1; return }
-        var matched = -1; var dx = 0f; var dy = 0f
-        for (i in 0 until arr.length()) {
-            val obj = arr.getJSONObject(i)
-            val diffAz = ((obj.getDouble("az").toFloat() - currentAzimuth + 540f) % 360f) - 180f
-            val diffPt = obj.getDouble("pt").toFloat() - currentPitch
-            if (abs(diffAz) <= 22f && abs(diffPt) <= 22f) { matched = i; dx = diffAz * 10f; dy = diffPt * 10f; break }
-        }
-        if (matched != -1) {
-            if (activeCapsuleIndex != matched) {
-                activeCapsuleIndex = matched
-                arImage.visibility = View.GONE
-                arTitle.text = "طَيْف مشفر مثبت في هذه الزاوية"
-                arNote.text = "قرّب بطاقة التعريف الوطنية لفتحه"
-            }
-            arCard.visibility = View.VISIBLE
-            arCard.translationX = dx
-            arCard.translationY = dy
-        } else { activeCapsuleIndex = -1; arCard.visibility = View.GONE }
-    }
-
-    private fun openCreatePanel() {
-        isCreatingMode = true; selectedImageBase64 = null; noteInput.setText("")
-        pickedStatus.text = "لم يتم اختيار صورة بعد"; pickedStatus.setTextColor(Color.parseColor("#94A3B8"))
-        createDialog.visibility = View.VISIBLE
-    }
-
-    private fun closeCreatePanel() { isCreatingMode = false; createDialog.visibility = View.GONE }
-
-    private fun compressUriToBase64(uri: Uri): String? {
-        return try {
-            val original = BitmapFactory.decodeStream(contentResolver.openInputStream(uri)) ?: return null
-            val ratio = minOf(900f / original.width, 900f / original.height, 1f)
-            val scaled = Bitmap.createScaledBitmap(original, (original.width * ratio).toInt(), (original.height * ratio).toInt(), true)
-            val out = ByteArrayOutputStream()
-            scaled.compress(Bitmap.CompressFormat.JPEG, 80, out)
-            Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
-        } catch (_: Exception) { null }
-    }
-
-    private fun encryptAes(plain: String, uid: String): String {
-        val keyBytes = MessageDigest.getInstance("SHA-256").digest(uid.toByteArray())
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(keyBytes, "AES"))
-        return Base64.encodeToString(cipher.iv, Base64.NO_WRAP) + ":" + Base64.encodeToString(cipher.doFinal(plain.toByteArray()), Base64.NO_WRAP)
-    }
-
-    private fun decryptAes(cipherText: String, uid: String): String? {
-        return try {
-            val p = cipherText.split(":")
-            val keyBytes = MessageDigest.getInstance("SHA-256").digest(uid.toByteArray())
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(keyBytes, "AES"), GCMParameterSpec(128, Base64.decode(p[0], Base64.NO_WRAP)))
-            String(cipher.doFinal(Base64.decode(p[1], Base64.NO_WRAP)))
-        } catch (_: Exception) { null }
-    }
-
-    private fun getCapsFile(): File = File(filesDir, "tayf_anchors.json")
-    private fun loadCapsArray(): JSONArray = if (getCapsFile().exists()) JSONArray(getCapsFile().readText()) else JSONArray()
-
-    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) startHighResCamera()
-    }
-}
+    private fun hasValidContent(): Boolean {
+        val textVal = noteInput.text.toString().trim()
+        if (selectedFileBytes == null && textVal.isEmpty()) {
+            T
