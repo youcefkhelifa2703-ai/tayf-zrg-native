@@ -36,7 +36,7 @@ object VaultEngine {
                 if (idx >= 0) name = it.getString(idx)
             }
         }
-        val raw = ctx.contentResolver.openInputStream(uri)?.readBytes() ?: return null
+        val raw = ctx.contentResolver.openInputStream(uri)?.readBytes() ?: return@try null
         val bytes = if (mime.startsWith("image/")) {
             val b = BitmapFactory.decodeByteArray(raw, 0, raw.size)
             if (b != null) {
@@ -75,7 +75,7 @@ object VaultEngine {
     }
 
     fun unlockItem(ctx: Context, item: JSONObject, secret: String): Pair<JSONObject, ByteArray?>? {
-        val dec = decrypt(Base64.decode(item.getString("meta"), Base64.NO_WRAP), secret) ?: return null
+        val dec = decrypt(Base64.decode(item.getString("meta"), Base64.NO_WRAP), secret) ?: return@try null
         val meta = JSONObject(String(dec))
         val fn = meta.optString("file")
         val bytes = if (fn.isNotEmpty()) decrypt(File(vaultDir(ctx), fn).readBytes(), secret) else null
