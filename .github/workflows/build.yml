@@ -1,4 +1,4 @@
-name: Build Native TAYF ZRG APK
+name: Build TAYF GHOST APK
 
 on:
   push:
@@ -8,9 +8,6 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    env:
-      ANDROID_HOME: /usr/local/lib/android/sdk
-      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
     steps:
       - uses: actions/checkout@v4
 
@@ -20,22 +17,286 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Accept Licenses
+      - name: Generate TAYF GHOST Source Files
         run: |
-          mkdir -p "$ANDROID_HOME/licenses"
-          echo -e "\n24333f8a63b6825ea9c5514f83c2829b004d1fee" > "$ANDROID_HOME/licenses/android-sdk-license"
+          rm -rf app/src/main/java/*
+          mkdir -p app/src/main/java/com/zrg/tayf app/src/main/res/xml
 
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
-        with:
-          gradle-version: '8.4'
+          cat << 'EOF' > app/build.gradle
+          plugins {
+              id 'com.android.application'
+              id 'org.jetbrains.kotlin.android'
+          }
+          android {
+              namespace 'com.zrg.tayf'
+              compileSdk 34
+              defaultConfig {
+                  applicationId "com.zrg.tayf"
+                  minSdk 26
+                  targetSdk 34
+                  versionCode 2
+                  versionName "2.0-GHOST"
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = '17' }
+          }
+          dependencies {
+              implementation 'androidx.core:core-ktx:1.12.0'
+              implementation 'androidx.appcompat:appcompat:1.6.1'
+              implementation 'com.google.android.material:material:1.11.0'
+              implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
+              implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+          }
+          EOF
+
+          cat << 'EOF' > app/src/main/res/xml/file_paths.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <paths><cache-path name="ghost_cam" path="." /></paths>
+          EOF
+
+          cat << 'EOF' > app/src/main/AndroidManifest.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.NFC" />
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.CAMERA" />
+              <uses-permission android:name="android.permission.VIBRATE" />
+              <uses-feature android:name="android.hardware.nfc" android:required="true" />
+              <application android:allowBackup="false" android:label="TAYF GHOST" android:theme="@style/Theme.MaterialComponents.DayNight.NoActionBar">
+                  <activity android:name=".MainActivity" android:exported="true" android:screenOrientation="portrait">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+                  <provider android:name="androidx.core.content.FileProvider" android:authorities="${applicationId}.fileprovider" android:exported="false" android:grantUriPermissions="true">
+                      <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/file_paths" />
+                  </provider>
+              </application>
+          </manifest>
+          EOF
+
+          cat << 'EOF' > app/src/main/java/com/zrg/tayf/MainActivity.kt
+          package com.zrg.tayf
+
+          import android.content.Context
+          import android.graphics.*
+          import android.media.AudioManager
+          import android.media.ToneGenerator
+          import android.net.Uri
+          import android.nfc.NfcAdapter
+          import android.nfc.Tag
+          import android.nfc.tech.IsoDep
+          import android.os.*
+          import android.text.InputType
+          import android.util.Base64
+          import android.view.Gravity
+          import android.view.View
+          import android.widget.*
+          import androidx.activity.result.contract.ActivityResultContracts
+          import androidx.appcompat.app.AppCompatActivity
+          import androidx.core.content.FileProvider
+          import kotlinx.coroutines.*
+          import okhttp3.MediaType.Companion.toMediaType
+          import okhttp3.OkHttpClient
+          import okhttp3.Request
+          import okhttp3.RequestBody.Companion.toRequestBody
+          import org.json.JSONObject
+          import java.io.ByteArrayOutputStream
+          import java.io.File
+          import java.security.MessageDigest
+          import java.security.SecureRandom
+          import javax.crypto.Cipher
+          import javax.crypto.SecretKeyFactory
+          import javax.crypto.spec.GCMParameterSpec
+          import javax.crypto.spec.PBEKeySpec
+          import javax.crypto.spec.SecretKeySpec
+
+          class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
+              private var nfcAdapter: NfcAdapter? = null
+              private val client = OkHttpClient()
+              private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+              private var isSendMode = true
+              private var selectedImageBytes: ByteArray? = null
+              private var cameraPhotoUri: Uri? = null
+
+              private lateinit var statusText: TextView
+              private lateinit var pinInput: EditText
+              private lateinit var noteInput: EditText
+              private lateinit var previewImage: ImageView
+              private lateinit var modeSendBtn: Button
+              private lateinit var modeReceiveBtn: Button
+              private lateinit var captureBtn: Button
+              private lateinit var pickBtn: Button
+
+              private val takePictureLauncher = registerForActivityResult(ActivityResultContracts.TakePicture()) { ok ->
+                  if (ok && cameraPhotoUri != null) processImageUri(cameraPhotoUri!!)
+              }
+              private val pickImageLauncher = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+                  if (uri != null) processImageUri(uri)
+              }
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  nfcAdapter = NfcAdapter.getDefaultAdapter(this)
+                  val scroll = ScrollView(this).apply { setBackgroundColor(Color.parseColor("#0A0E14")) }
+                  val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(48, 64, 48, 64) }
+                  val title = TextView(this).apply {
+                      text = "TAYF GHOST // NFC CARRIER"; textSize = 20f; typeface = Typeface.MONOSPACE
+                      setTextColor(Color.parseColor("#00F0FF")); gravity = Gravity.CENTER
+                  }
+                  val modeRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, 32, 0, 24) }
+                  modeSendBtn = Button(this).apply { text = "شحن البطاقة (إرسال)"; layoutParams = LinearLayout.LayoutParams(0, -2, 1f); setOnClickListener { switchMode(true) } }
+                  modeReceiveBtn = Button(this).apply { text = "قراءة البطاقة (استلام)"; layoutParams = LinearLayout.LayoutParams(0, -2, 1f); setOnClickListener { switchMode(false) } }
+                  modeRow.addView(modeSendBtn); modeRow.addView(modeReceiveBtn)
+
+                  pinInput = EditText(this).apply {
+                      hint = "الرمز السري المشترك (مثال: 2703)"; inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_VARIATION_PASSWORD
+                      setTextColor(Color.WHITE); setHintTextColor(Color.GRAY); setBackgroundColor(Color.parseColor("#161D29")); setPadding(32, 28, 32, 28)
+                  }
+                  noteInput = EditText(this).apply {
+                      hint = "رسالة سرية (اختياري)..."; setTextColor(Color.WHITE); setHintTextColor(Color.GRAY)
+                      setBackgroundColor(Color.parseColor("#161D29")); setPadding(32, 28, 32, 28)
+                  }
+                  val mediaRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, 24, 0, 24) }
+                  captureBtn = Button(this).apply { text = "📷 الكاميرا"; layoutParams = LinearLayout.LayoutParams(0, -2, 1f); setOnClickListener { launchCamera() } }
+                  pickBtn = Button(this).apply { text = "🖼️ المعرض"; layoutParams = LinearLayout.LayoutParams(0, -2, 1f); setOnClickListener { pickImageLauncher.launch("image/*") } }
+                  mediaRow.addView(captureBtn); mediaRow.addView(pickBtn)
+
+                  previewImage = ImageView(this).apply { layoutParams = LinearLayout.LayoutParams(-1, 500); scaleType = ImageView.ScaleType.FIT_CENTER; visibility = View.GONE }
+                  statusText = TextView(this).apply {
+                      textSize = 15f; typeface = Typeface.MONOSPACE; setTextColor(Color.parseColor("#00FF88"))
+                      gravity = Gravity.CENTER; setPadding(24, 36, 24, 36); setBackgroundColor(Color.parseColor("#131B26"))
+                  }
+                  root.addView(title); root.addView(modeRow); root.addView(pinInput); root.addView(Space(this).apply { minimumHeight = 20 })
+                  root.addView(noteInput); root.addView(mediaRow); root.addView(previewImage); root.addView(Space(this).apply { minimumHeight = 24 }); root.addView(statusText)
+                  scroll.addView(root); setContentView(scroll); switchMode(true)
+              }
+
+              private fun switchMode(send: Boolean) {
+                  isSendMode = send
+                  modeSendBtn.setBackgroundColor(Color.parseColor(if (send) "#00A86B" else "#232D3F"))
+                  modeReceiveBtn.setBackgroundColor(Color.parseColor(if (!send) "#0088CC" else "#232D3F"))
+                  val vis = if (send) View.VISIBLE else View.GONE
+                  noteInput.visibility = vis; captureBtn.visibility = vis; pickBtn.visibility = vis; previewImage.visibility = View.GONE
+                  statusText.text = if (send) "جهّز الصورة والرمز السري ثم لامس بطاقة التعريف لظهر الهاتف" else "أدخل نفس الرمز السري ثم لامس بطاقة التعريف للاستلام"
+              }
+
+              private fun launchCamera() {
+                  val file = File(cacheDir, "ghost_${System.currentTimeMillis()}.jpg")
+                  cameraPhotoUri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+                  takePictureLauncher.launch(cameraPhotoUri)
+              }
+
+              private fun processImageUri(uri: Uri) {
+                  val orig = contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it) } ?: return
+                  val scale = minOf(800f / orig.width, 800f / orig.height, 1f)
+                  val bmp = Bitmap.createScaledBitmap(orig, (orig.width * scale).toInt(), (orig.height * scale).toInt(), true)
+                  val out = ByteArrayOutputStream().apply { bmp.compress(Bitmap.CompressFormat.JPEG, 72, this) }
+                  selectedImageBytes = out.toByteArray()
+                  previewImage.setImageBitmap(bmp); previewImage.visibility = View.VISIBLE
+                  statusText.text = "تم تجهيز الصورة (${selectedImageBytes!!.size / 1024} KB)\nقرّب بطاقة التعريف الآن!"
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  nfcAdapter?.enableReaderMode(this, this, NfcAdapter.FLAG_READER_NFC_A or NfcAdapter.FLAG_READER_NFC_B or NfcAdapter.FLAG_READER_SKIP_NDEF_CHECK, null)
+              }
+              override fun onPause() { super.onPause(); nfcAdapter?.disableReaderMode(this) }
+
+              override fun onTagDiscovered(tag: Tag?) {
+                  if (tag == null) return
+                  val uidHex = tag.id.joinToString("") { "%02X".format(it) }
+                  val isIso = IsoDep.get(tag) != null
+                  runOnUiThread {
+                      beep()
+                      val pin = pinInput.text.toString().trim()
+                      if (pin.length < 4) { statusText.text = "⚠️ أدخل 4 أرقام على الأقل للرمز السري!"; return@runOnUiThread }
+                      if (!isIso) { statusText.text = "⚠️ استخدم بطاقة التعريف البيومترية (IsoDep)!"; return@runOnUiThread }
+                      if (isSendMode) uploadData(uidHex, pin) else downloadData(uidHex, pin)
+                  }
+              }
+
+              private fun deriveKeys(uidHex: String, pin: String): Pair<String, SecretKeySpec> {
+                  val salt = MessageDigest.getInstance("SHA-256").digest("TAYF_DZ_$uidHex".toByteArray())
+                  val keyBytes = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(PBEKeySpec(pin.toCharArray(), salt, 60000, 256)).encoded
+                  val topic = MessageDigest.getInstance("SHA-256").digest(keyBytes).take(12).joinToString("") { "%02x".format(it) }
+                  return Pair("tayf_zrg_$topic", SecretKeySpec(keyBytes, "AES"))
+              }
+
+              private fun uploadData(uidHex: String, pin: String) {
+                  val note = noteInput.text.toString().trim()
+                  if (selectedImageBytes == null && note.isEmpty()) { statusText.text = "⚠️ التقط صورة أو اكتب رسالة أولاً!"; return }
+                  statusText.text = "⏳ جاري التشفير والشحن..."
+                  scope.launch(Dispatchers.IO) {
+                      try {
+                          val (topic, key) = deriveKeys(uidHex, pin)
+                          val json = JSONObject().apply {
+                              put("note", note)
+                              if (selectedImageBytes != null) put("img", Base64.encodeToString(selectedImageBytes, Base64.NO_WRAP))
+                          }.toString()
+                          val iv = ByteArray(12).apply { SecureRandom().nextBytes(this) }
+                          val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.ENCRYPT_MODE, key, GCMParameterSpec(128, iv)) }
+                          val enc = Base64.encodeToString(iv + cipher.doFinal(json.toByteArray()), Base64.NO_WRAP)
+                          val req = Request.Builder().url("https://ntfy.sh/$topic").post(enc.toRequestBody("text/plain".toMediaType())).build()
+                          client.newCall(req).execute().use { r ->
+                              withContext(Dispatchers.Main) {
+                                  if (r.isSuccessful) { beep(); statusText.text = "✅ تم شحن الصورة في البطاقة بنجاح!" }
+                                  else statusText.text = "❌ فشل الرفع (${r.code})"
+                              }
+                          }
+                      } catch (e: Exception) { withContext(Dispatchers.Main) { statusText.text = "❌ خطأ: ${e.message}" } }
+                  }
+              }
+
+              private fun downloadData(uidHex: String, pin: String) {
+                  statusText.text = "⏳ جاري سحب البيانات وفك التشفير..."
+                  scope.launch(Dispatchers.IO) {
+                      try {
+                          val (topic, key) = deriveKeys(uidHex, pin)
+                          val req = Request.Builder().url("https://ntfy.sh/$topic/json?poll=1").get().build()
+                          client.newCall(req).execute().use { r ->
+                              val lines = r.body?.string().orEmpty().trim().lines().filter { it.isNotBlank() }
+                              if (lines.isEmpty()) { withContext(Dispatchers.Main) { statusText.text = "⚠️ لا توجد بيانات مشحونة لهذه البطاقة!" }; return@use }
+                              val raw = Base64.decode(JSONObject(lines.last()).getString("message"), Base64.NO_WRAP)
+                              val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, raw.copyOfRange(0, 12))) }
+                              val obj = JSONObject(String(cipher.doFinal(raw.copyOfRange(12, raw.size))))
+                              val note = obj.optString("note", ""); val img = obj.optString("img", "")
+                              withContext(Dispatchers.Main) {
+                                  beep()
+                                  if (img.isNotEmpty()) {
+                                      val b = Base64.decode(img, Base64.NO_WRAP)
+                                      previewImage.setImageBitmap(BitmapFactory.decodeByteArray(b, 0, b.size)); previewImage.visibility = View.VISIBLE
+                                  }
+                                  statusText.text = if (note.isNotEmpty()) "✅ تم الاستلام:\n$note" else "✅ تم استخراج الصورة بنجاح!"
+                              }
+                          }
+                      } catch (e: Exception) { withContext(Dispatchers.Main) { statusText.text = "❌ رمز خاطئ أو بطاقة مختلفة!" } }
+                  }
+              }
+
+              private fun beep() {
+                  try {
+                      val v = getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+                      if (Build.VERSION.SDK_INT >= 26) v?.vibrate(VibrationEffect.createOneShot(120, -1))
+                      ToneGenerator(AudioManager.STREAM_NOTIFICATION, 85).startTone(ToneGenerator.TONE_PROP_BEEP, 150)
+                  } catch (_: Exception) {}
+              }
+              override fun onDestroy() { super.onDestroy(); scope.cancel() }
+          }
+          EOF
 
       - name: Build Debug APK
-        run: gradle assembleDebug --stacktrace
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: TAYF-ZRG-Native
+          name: TAYF-GHOST-APK
           path: app/build/outputs/apk/debug/app-debug.apk
           
