@@ -239,7 +239,11 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         if (pb != null && m.optString("mime").startsWith("image/")) {
             arImg.setImageBitmap(BitmapFactory.decodeByteArray(pb, 0, pb.size)); arImg.visibility = View.VISIBLE; openFileBtn.visibility = View.GONE
         } else if (pb != null) {
-            arImg.visibility = View.GONE; outFile = File(cacheDir, m.optString("name")).apply { writeBytes(pb) }; outMime = m.optString("mime"); openFileBtn.visibility = View.VISIBLE
+            arImg.visibility = View.GONE
+            val recoveredDir = File(cacheDir, "recovered").apply { mkdirs() }
+            val safeName = File(m.optString("name")).name.takeUnless { it.isBlank() || it == "." || it == ".." } ?: "recovered-file"
+            outFile = File(recoveredDir, safeName).apply { writeBytes(pb) }
+            outMime = m.optString("mime"); openFileBtn.visibility = View.VISIBLE
         }
         statusTxt.text = "الحالة: تم فك التشفير بنجاح"; return true
     }
@@ -269,4 +273,48 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                     arImg.visibility = View.GONE; openFileBtn.visibility = View.GONE
                     arTitle.text = "[ نقطة مشفرة مرصودة ]"; arTitle.setTextColor(Color.parseColor("#D97706"))
                     if (it.optString("lt") == "PIN") { arNote.text = "الحماية: رمز سري (PIN)"; unlockPinBtn.visibility = View.VISIBLE }
-                    else { arNote.text = "الحما
+                    else { arNote.text = "الحماية: بطاقة NFC"; unlockPinBtn.visibility = View.GONE }
+                }
+            }
+            arCard.visibility = View.VISIBLE
+            arCard.translationX = dp(dx.toInt()).toFloat()
+            arCard.translationY = dp(dy.toInt()).toFloat()
+        } else {
+            activeIdx = -1
+            unlockedId = null
+            arCard.visibility = View.GONE
+        }
+    }
+
+    private fun closeAll() {
+        createDlg.visibility = View.GONE
+        nfcBox.visibility = View.GONE
+        pinDlg.visibility = View.GONE
+        pinIn.setText("")
+        state = "SCAN"
+        evalAngle()
+    }
+
+    private fun openOutFile() {
+        val file = outFile ?: return
+        val uri = FileProvider.getUriForFile(this, "$packageName.files", file)
+        val viewIntent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, outMime.ifEmpty { "application/octet-stream" })
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        try {
+            startActivity(Intent.createChooser(viewIntent, "فتح الملف"))
+        } catch (_: android.content.ActivityNotFoundException) {
+            Toast.makeText(this, "لا يوجد تطبيق لفتح هذا الملف", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int, permissions: Array<out String>, grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == 100 && grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
+            startCam()
+        }
+    }
+}
