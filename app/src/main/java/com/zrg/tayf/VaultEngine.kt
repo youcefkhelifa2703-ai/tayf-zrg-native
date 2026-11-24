@@ -16,9 +16,8 @@ import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 object VaultEngine {
-
     private fun vaultDir(ctx: Context) = File(ctx.filesDir, "tayf_vault").apply { if (!exists()) mkdirs() }
-    private fun capsFile(ctx: Context) = File(ctx.filesDir, "tayf_anchors.json")
+    private fun capsFile(ctx: Context) = File(ctx.filesDir, "tayf_spatial_v2.json")
 
     fun loadAll(ctx: Context): JSONArray =
         if (capsFile(ctx).exists()) JSONArray(capsFile(ctx).readText()) else JSONArray()
@@ -28,78 +27,72 @@ object VaultEngine {
         vaultDir(ctx).deleteRecursively()
     }
 
-    fun readUri(ctx: Context, uri: Uri): Triple<ByteArray, String, String>? {
-        return try {
-            val mime = ctx.contentResolver.getType(uri) ?: "application/octet-stream"
-            var name = "FILE_${System.currentTimeMillis()}"
-            ctx.contentResolver.query(uri, null, null, null, null)?.use {
-                if (it.moveToFirst()) {
-                    val idx = it.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                    if (idx >= 0) name = it.getString(idx)
-                }
+    fun readUri(ctx: Context, uri: Uri): Triple<ByteArray, String, String>? = try {
+        val mime = ctx.contentResolver.getType(uri) ?: "application/octet-stream"
+        var name = "DOC_${System.currentTimeMillis()}"
+        ctx.contentResolver.query(uri, null, null, null, null)?.use {
+            if (it.moveToFirst()) {
+                val idx = it.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (idx >= 0) name = it.getString(idx)
             }
-            val raw = ctx.contentResolver.openInputStream(uri)?.readBytes() ?: return null
-            val finalBytes = if (mime.startsWith("image/")) {
-                val bmp = BitmapFactory.decodeByteArray(raw, 0, raw.size)
-                if (bmp != null) {
-                    val r = minOf(1200f / bmp.width, 1200f / bmp.height, 1f)
-                    ByteArrayOutputStream().also {
-                        Bitmap.createScaledBitmap(bmp, (bmp.width * r).toInt(), (bmp.height * r).toInt(), true)
-                            .compress(Bitmap.CompressFormat.JPEG, 85, it)
-                    }.toByteArray()
-                } else raw
+        }
+        val raw = ctx.contentResolver.openInputStream(uri)?.readBytes() ?: return null
+        val bytes = if (mime.startsWith("image/")) {
+            val b = BitmapFactory.decodeByteArray(raw, 0, raw.size)
+            if (b != null) {
+                val r = minOf(1280f / b.width, 1280f / b.height, 1f)
+                ByteArrayOutputStream().also {
+                    Bitmap.createScaledBitmap(b, (b.width * r).toInt(), (b.height * r).toInt(), true)
+                        .compress(Bitmap.CompressFormat.JPEG, 88, it)
+                }.toByteArray()
             } else raw
-            Triple(finalBytes, name, mime)
-        } catch (_: Exception) { null }
-    }
+        } else raw
+        Triple(bytes, name, mime)
+    } catch (_: Exception) { null }
 
-    fun saveAnchor(
-        ctx: Context, az: Float, pt: Float, lockType: String, secret: String,
+    fun saveSpatialItem(
+        ctx: Context, x: Float, y: Float, z: Float, lockType: String, secret: String,
         note: String, fileData: Triple<ByteArray, String, String>?
     ) {
         val id = System.currentTimeMillis().toString()
-        var savedName = ""
+        var saved = ""
         if (fileData != null) {
-            savedName = "$id.enc"
-            File(vaultDir(ctx), savedName).writeBytes(encrypt(fileData.first, secret))
+            saved = "$id.enc"
+            File(vaultDir(ctx), saved).writeBytes(encrypt(fileData.first, secret))
         }
         val meta = JSONObject().apply {
-            put("txt", note)
-            put("file", savedName)
-            put("name", fileData?.second ?: "")
-            put("mime", fileData?.third ?: "")
+            put("txt", note); put("file", saved)
+            put("name", fileData?.second ?: ""); put("mime", fileData?.third ?: "")
         }.toString()
 
         val arr = loadAll(ctx)
         arr.put(JSONObject().apply {
-            put("id", id)
-            put("az", az.toDouble())
-            put("pt", pt.toDouble())
+            put("id", id); put("x", x.toDouble()); put("y", y.toDouble()); put("z", z.toDouble())
             put("lt", lockType)
             put("meta", Base64.encodeToString(encrypt(meta.toByteArray(), secret), Base64.NO_WRAP))
         })
         capsFile(ctx).writeText(arr.toString())
     }
 
-    fun unlockAnchor(ctx: Context, item: JSONObject, secret: String): Pair<JSONObject, ByteArray?>? {
-        val decMeta = decrypt(Base64.decode(item.getString("meta"), Base64.NO_WRAP), secret) ?: return null
-        val meta = JSONObject(String(decMeta))
+    fun unlockItem(ctx: Context, item: JSONObject, secret: String): Pair<JSONObject, ByteArray?>? {
+        val dec = decrypt(Base64.decode(item.getString("meta"), Base64.NO_WRAP), secret) ?: return null
+        val meta = JSONObject(String(dec))
         val fn = meta.optString("file")
-        val plainBytes = if (fn.isNotEmpty()) decrypt(File(vaultDir(ctx), fn).readBytes(), secret) else null
-        return Pair(meta, plainBytes)
+        val bytes = if (fn.isNotEmpty()) decrypt(File(vaultDir(ctx), fn).readBytes(), secret) else null
+        return Pair(meta, bytes)
     }
 
     private fun encrypt(plain: ByteArray, secret: String): ByteArray {
         val key = SecretKeySpec(MessageDigest.getInstance("SHA-256").digest(secret.toByteArray()), "AES")
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.ENCRYPT_MODE, key) }
-        return byteArrayOf(cipher.iv.size.toByte()) + cipher.iv + cipher.doFinal(plain)
+        val c = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.ENCRYPT_MODE, key) }
+        return byteArrayOf(c.iv.size.toByte()) + c.iv + c.doFinal(plain)
     }
 
     private fun decrypt(data: ByteArray, secret: String): ByteArray? = try {
-        val ivLen = data[0].toInt()
+        val l = data[0].toInt()
         val key = SecretKeySpec(MessageDigest.getInstance("SHA-256").digest(secret.toByteArray()), "AES")
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, data.copyOfRange(1, 1 + ivLen)))
-        cipher.doFinal(data.copyOfRange(1 + ivLen, data.size))
+        val c = Cipher.getInstance("AES/GCM/NoPadding")
+        c.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, data.copyOfRange(1, 1 + l)))
+        c.doFinal(data.copyOfRange(1 + l, data.size))
     } catch (_: Exception) { null }
 }
