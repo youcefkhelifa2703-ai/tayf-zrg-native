@@ -9,7 +9,10 @@ jobs:
         with:
           java-version: '17'
           distribution: 'temurin'
-      - run: bash build.sh
+      - run: |
+          bash build.sh
+          chmod +x gradlew
+          ./gradlew assembleDebug
       - uses: actions/upload-artifact@v4
         with:
           name: TAYF-GHOST-FINAL-APK
